@@ -49,7 +49,7 @@ protocol BolusEntryViewModelDelegate: AnyObject {
     
     var settings: LoopSettings { get }
 
-    var displayGlucoseUnitObservable: DisplayGlucoseUnitObservable { get }
+    var displayGlucosePreference: DisplayGlucosePreference { get }
 
     func roundBolusVolume(units: Double) -> Double
 
@@ -144,8 +144,6 @@ final class BolusEntryViewModel: ObservableObject {
             traitCollection: UITraitCollection.current)
     }()
 
-    let glucoseQuantityFormatter = QuantityFormatter()
-
     @Published var isManualGlucoseEntryEnabled = false
     @Published var manualGlucoseQuantity: HKQuantity?
 
@@ -164,7 +162,7 @@ final class BolusEntryViewModel: ObservableObject {
     // MARK: - Initialization
 
     init(
-        delegate: BolusEntryViewModelDelegate,
+        delegate: BolusEntryViewModelDelegate?,
         now: @escaping () -> Date = { Date() },
         screenWidth: CGFloat,
         debounceIntervalMilliseconds: Int = 400,
@@ -442,8 +440,7 @@ final class BolusEntryViewModel: ObservableObject {
     }
 
     private lazy var bolusAmountFormatter: NumberFormatter = {
-        let formatter = QuantityFormatter()
-        formatter.setPreferredNumberFormatter(for: .internationalUnit())
+        let formatter = QuantityFormatter(for: .internationalUnit())
         formatter.numberFormatter.roundingMode = .down
         return formatter.numberFormatter
     }()
@@ -472,7 +469,7 @@ final class BolusEntryViewModel: ObservableObject {
     var carbEntryAmountAndEmojiString: String? {
         guard
             let potentialCarbEntry = potentialCarbEntry,
-            let carbAmountString = QuantityFormatter(for: .gram()).string(from: potentialCarbEntry.quantity, for: .gram())
+            let carbAmountString = QuantityFormatter(for: .gram()).string(from: potentialCarbEntry.quantity)
         else {
             return nil
         }

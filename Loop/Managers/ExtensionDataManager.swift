@@ -61,11 +61,7 @@ final class ExtensionDataManager {
     }
     
     private func update() {
-        guard let unit = (deviceManager.glucoseStore.preferredUnit ?? ExtensionDataManager.context?.predictedGlucose?.unit) else {
-            return
-        }
-
-        createStatusContext(glucoseUnit: unit) { (context) in
+        createStatusContext(glucoseUnit:  deviceManager.preferredGlucoseUnit) { (context) in
             if let context = context {
                 ExtensionDataManager.context = context
             }
@@ -120,6 +116,10 @@ final class ExtensionDataManager {
             context.lastLoopCompleted = lastLoopCompleted
             
             context.isClosedLoop = self.automaticDosingStatus.automaticDosingEnabled
+            
+            context.preMealPresetAllowed = self.automaticDosingStatus.automaticDosingEnabled && manager.settings.preMealTargetRange != nil
+            context.preMealPresetActive = manager.settings.preMealTargetEnabled()
+            context.customPresetActive = manager.settings.nonPreMealOverrideEnabled()
 
             // Drop the first element in predictedGlucose because it is the currentGlucose
             // and will have a different interval to the next element

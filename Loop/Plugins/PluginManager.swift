@@ -64,12 +64,12 @@ class PluginManager {
     }
 
     var availablePumpManagers: [PumpManagerDescriptor] {
-        return pluginBundles.compactMap({ (bundle) -> PumpManagerDescriptor? in
+        pluginBundles.compactMap({ (bundle) -> PumpManagerDescriptor? in
             guard let title = bundle.object(forInfoDictionaryKey: LoopPluginBundleKey.pumpManagerDisplayName.rawValue) as? String,
                 let identifier = bundle.object(forInfoDictionaryKey: LoopPluginBundleKey.pumpManagerIdentifier.rawValue) as? String else {
                     return nil
             }
-            
+
             return PumpManagerDescriptor(identifier: identifier, localizedTitle: title)
         })
     }
@@ -100,12 +100,12 @@ class PluginManager {
     }
     
     var availableCGMManagers: [CGMManagerDescriptor] {
-        return pluginBundles.compactMap({ (bundle) -> CGMManagerDescriptor? in
+        pluginBundles.compactMap({ (bundle) -> CGMManagerDescriptor? in
             guard let title = bundle.object(forInfoDictionaryKey: LoopPluginBundleKey.cgmManagerDisplayName.rawValue) as? String,
                 let identifier = bundle.object(forInfoDictionaryKey: LoopPluginBundleKey.cgmManagerIdentifier.rawValue) as? String else {
                     return nil
             }
-            
+
             return CGMManagerDescriptor(identifier: identifier, localizedTitle: title)
         })
     }
@@ -143,6 +143,37 @@ class PluginManager {
             }
 
             return ServiceDescriptor(identifier: identifier, localizedTitle: title)
+        })
+    }
+    
+    func getStatefulPluginTypeByIdentifier(_ identifier: String) -> StatefulPluggable.Type? {
+        for bundle in pluginBundles {
+            if let name = bundle.object(forInfoDictionaryKey: LoopPluginBundleKey.statefulPluginIdentifier.rawValue) as? String, name == identifier {
+                do {
+                    try bundle.loadAndReturnError()
+
+                    if let principalClass = bundle.principalClass as? NSObject.Type {
+
+                        if let plugin = principalClass.init() as? StatefulPlugin {
+                            return plugin.pluginType
+                        } else {
+                            fatalError("PrincipalClass does not conform to StatefulPlugin")
+                        }
+
+                    } else {
+                        fatalError("PrincipalClass not found")
+                    }
+                } catch let error {
+                    log.error("Error loading plugin: %{public}@", String(describing: error))
+                }
+            }
+        }
+        return nil
+    }
+    
+    var availableStatefulPluginIdentifiers: [String] {
+        return pluginBundles.compactMap({ (bundle) -> String? in
+            return bundle.object(forInfoDictionaryKey: LoopPluginBundleKey.statefulPluginIdentifier.rawValue) as? String
         })
     }
 
@@ -201,18 +232,18 @@ class PluginManager {
         }
         return nil
     }
-
 }
 
 
 extension Bundle {
     var isPumpManagerPlugin: Bool { object(forInfoDictionaryKey: LoopPluginBundleKey.pumpManagerIdentifier.rawValue) as? String != nil }
     var isCGMManagerPlugin: Bool { object(forInfoDictionaryKey: LoopPluginBundleKey.cgmManagerIdentifier.rawValue) as? String != nil }
+    var isStatefulPlugin: Bool { object(forInfoDictionaryKey: LoopPluginBundleKey.statefulPluginIdentifier.rawValue) as? String != nil }
     var isServicePlugin: Bool { object(forInfoDictionaryKey: LoopPluginBundleKey.serviceIdentifier.rawValue) as? String != nil }
     var isOnboardingPlugin: Bool { object(forInfoDictionaryKey: LoopPluginBundleKey.onboardingIdentifier.rawValue) as? String != nil }
     var isSupportPlugin: Bool { object(forInfoDictionaryKey: LoopPluginBundleKey.supportIdentifier.rawValue) as? String != nil }
 
-    var isLoopPlugin: Bool { isPumpManagerPlugin || isCGMManagerPlugin || isServicePlugin || isOnboardingPlugin || isSupportPlugin }
+    var isLoopPlugin: Bool { isPumpManagerPlugin || isCGMManagerPlugin || isStatefulPlugin || isServicePlugin || isOnboardingPlugin || isSupportPlugin }
 
     var isLoopExtension: Bool { object(forInfoDictionaryKey: LoopPluginBundleKey.extensionIdentifier.rawValue) as? String != nil }
 

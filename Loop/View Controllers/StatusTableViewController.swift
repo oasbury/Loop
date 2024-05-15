@@ -29,7 +29,7 @@ final class StatusTableViewController: LoopChartsTableViewController {
 
     private let log = OSLog(category: "StatusTableViewController")
 
-    lazy var quantityFormatter: QuantityFormatter = QuantityFormatter()
+    lazy var carbFormatter: QuantityFormatter = QuantityFormatter(for: .gram())
 
     var onboardingManager: OnboardingManager!
 
@@ -164,7 +164,6 @@ final class StatusTableViewController: LoopChartsTableViewController {
         navigationController?.setNavigationBarHidden(true, animated: animated)
         navigationController?.setToolbarHidden(false, animated: animated)
         
-        setupToolbarItems()
         updateToolbarItems()
 
         alertPermissionsChecker.checkNow()
@@ -240,9 +239,15 @@ final class StatusTableViewController: LoopChartsTableViewController {
     private var bolusState: PumpManagerStatus.BolusState = .noBolus {
         didSet {
             if oldValue != bolusState {
-                // Bolus starting
-                if case .inProgress = bolusState {
-                    bolusProgressReporter = deviceManager.pumpManager?.createBolusProgressReporter(reportingOn: DispatchQueue.main)
+                switch bolusState {
+                case .inProgress(_):
+                    guard case .inProgress = oldValue else {
+                        // Bolus starting
+                        bolusProgressReporter = deviceManager.pumpManager?.createBolusProgressReporter(reportingOn: DispatchQueue.main)
+                        break
+                    }
+                default:
+                    break
                 }
                 refreshContext.update(with: .status)
                 reloadData(animated: true)
@@ -265,11 +270,11 @@ final class StatusTableViewController: LoopChartsTableViewController {
     private func setupToolbarItems() {
         let space = UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: self, action: nil)
         let carbs = UIBarButtonItem(image: UIImage(named: "carbs"), style: .plain, target: self, action: #selector(userTappedAddCarbs))
-        let preMeal = createPreMealButtonItem(selected: false, isEnabled: true)
         let bolus = UIBarButtonItem(image: UIImage(named: "bolus"), style: .plain, target: self, action: #selector(presentBolusScreen))
-        let workout = createWorkoutButtonItem(selected: false, isEnabled: true)
         let settings = UIBarButtonItem(image: UIImage(named: "settings"), style: .plain, target: self, action: #selector(onSettingsTapped))
         
+        let preMeal = createPreMealButtonItem(selected: false, isEnabled: true)
+        let workout = createWorkoutButtonItem(selected: false, isEnabled: true)
         toolbarItems = [
             carbs,
             space,
@@ -282,20 +287,21 @@ final class StatusTableViewController: LoopChartsTableViewController {
             settings
         ]
     }
-    
+        
     private func updateToolbarItems() {
         let isPumpOnboarded = onboardingManager.isComplete || deviceManager.pumpManager?.isOnboarded == true
 
         toolbarItems![0].accessibilityLabel = NSLocalizedString("Add Meal", comment: "The label of the carb entry button")
         toolbarItems![0].isEnabled = isPumpOnboarded
         toolbarItems![0].tintColor = UIColor.carbTintColor
-        toolbarItems![2].isEnabled = isPumpOnboarded && (automaticDosingStatus.automaticDosingEnabled || !FeatureFlags.simpleBolusCalculatorEnabled)
         toolbarItems![4].accessibilityLabel = NSLocalizedString("Bolus", comment: "The label of the bolus entry button")
         toolbarItems![4].isEnabled = isPumpOnboarded
         toolbarItems![4].tintColor = UIColor.insulinTintColor
-        toolbarItems![6].isEnabled = isPumpOnboarded
         toolbarItems![8].accessibilityLabel = NSLocalizedString("Settings", comment: "The label of the settings button")
         toolbarItems![8].tintColor = UIColor.secondaryLabel
+        
+        toolbarItems![2] = createPreMealButtonItem(selected: preMealMode == true && preMealModeAllowed, isEnabled: preMealModeAllowed)
+        toolbarItems![6] = createWorkoutButtonItem(selected: workoutMode == true && workoutModeAllowed, isEnabled: workoutModeAllowed)
     }
 
     public var basalDeliveryState: PumpManagerStatus.BasalDeliveryState? = nil {
@@ -444,7 +450,7 @@ final class StatusTableViewController: LoopChartsTableViewController {
 
             if currentContext.contains(.carbs) {
                 reloadGroup.enter()
-                self.deviceManager.carbStore.getCarbsOnBoardValues(start: startDate, end: nil, effectVelocities: FeatureFlags.dynamicCarbAbsorptionEnabled ? state.insulinCounteractionEffects : nil) { (result) in
+                self.deviceManager.carbStore.getCarbsOnBoardValues(start: startDate, end: nil, effectVelocities: state.insulinCounteractionEffects) { (result) in
                     switch result {
                     case .failure(let error):
                         self.log.error("CarbStore failed to get carbs on board values: %{public}@", String(describing: error))
@@ -517,7 +523,7 @@ final class StatusTableViewController: LoopChartsTableViewController {
             }
         }
 
-        updatePreMealModeAvailability(automaticDosingEnabled: automaticDosingEnabled)
+        updatePresetModeAvailability(automaticDosingEnabled: automaticDosingEnabled)
 
         if deviceManager.loopManager.settings.preMealTargetRange == nil {
             preMealMode = nil
@@ -591,7 +597,7 @@ final class StatusTableViewController: LoopChartsTableViewController {
             if let index = charts.cob.cobPoints.closestIndex(priorTo: Date()) {
                 self.currentCOBDescription = String(describing: charts.cob.cobPoints[index].y)
             } else if let carbsOnBoard = carbsOnBoard {
-                self.currentCOBDescription = self.quantityFormatter.string(from: carbsOnBoard, for: .gram())
+                self.currentCOBDescription = self.carbFormatter.string(from: carbsOnBoard)
             } else {
                 self.currentCOBDescription = nil
             }
@@ -785,7 +791,7 @@ final class StatusTableViewController: LoopChartsTableViewController {
             case (.enactingBolus, .enactingBolus):
                 break
             case (.bolusing(let oldDose), .bolusing(let newDose)):
-                if oldDose != newDose {
+                if oldDose.syncIdentifier != newDose.syncIdentifier {
                     tableView.reloadRows(at: [statusIndexPath], with: animated ? .fade : .none)
                 }
             case (.pumpSuspended(resuming: let wasResuming), .pumpSuspended(resuming: let isResuming)):
@@ -826,15 +832,21 @@ final class StatusTableViewController: LoopChartsTableViewController {
             guard oldValue != preMealMode else {
                 return
             }
-            updatePreMealModeAvailability(automaticDosingEnabled: automaticDosingStatus.automaticDosingEnabled)
+            updatePresetModeAvailability(automaticDosingEnabled: automaticDosingStatus.automaticDosingEnabled)
         }
     }
+    private lazy var preMealModeAllowed: Bool = {
+        onboardingManager.isComplete &&
+                (automaticDosingStatus.automaticDosingEnabled || !FeatureFlags.simpleBolusCalculatorEnabled)
+                && deviceManager.loopManager.settings.preMealTargetRange != nil
+    }()
 
-    private func updatePreMealModeAvailability(automaticDosingEnabled: Bool) {
-        let allowed = onboardingManager.isComplete &&
+    private func updatePresetModeAvailability(automaticDosingEnabled: Bool) {
+        preMealModeAllowed = onboardingManager.isComplete &&
                 (automaticDosingEnabled || !FeatureFlags.simpleBolusCalculatorEnabled)
                 && deviceManager.loopManager.settings.preMealTargetRange != nil
-        toolbarItems![2] = createPreMealButtonItem(selected: preMealMode ?? false && allowed, isEnabled: allowed)
+        workoutModeAllowed = onboardingManager.isComplete && workoutMode != nil
+        updateToolbarItems()
     }
 
     private var workoutMode: Bool? = nil {
@@ -842,15 +854,13 @@ final class StatusTableViewController: LoopChartsTableViewController {
             guard oldValue != workoutMode else {
                 return
             }
-
-            if let workoutMode = workoutMode {
-                let allowed = onboardingManager.isComplete
-                toolbarItems![6] = createWorkoutButtonItem(selected: workoutMode, isEnabled: allowed)
-            } else {
-                toolbarItems![6].isEnabled = false
-            }
+            workoutModeAllowed = workoutMode != nil && onboardingManager.isComplete
+            updateToolbarItems()
         }
     }
+    private lazy var workoutModeAllowed: Bool = {
+        workoutMode != nil && onboardingManager.isComplete
+    }()
 
     // MARK: - Table view data source
 
@@ -910,6 +920,10 @@ final class StatusTableViewController: LoopChartsTableViewController {
     private class MuteAlertsWarningCell: UITableViewCell {
         var formattedAlertMuteEndTime: String = NSLocalizedString("Unknown", comment: "label for when the alert mute end time is unknown")
 
+        fileprivate class GradientView: UIView {
+            override static var layerClass: AnyClass { CAGradientLayer.self }
+        }
+        
         override func updateConfiguration(using state: UICellConfigurationState) {
             super.updateConfiguration(using: state)
 
@@ -917,21 +931,25 @@ final class StatusTableViewController: LoopChartsTableViewController {
 
             var contentConfig = defaultContentConfiguration().updated(for: state)
             let title = NSMutableAttributedString(string: NSLocalizedString("All Alerts Muted", comment: "Warning text for when alerts are muted"))
-            contentConfig.image = UIImage(systemName: "speaker.slash.fill")
+            let image = UIImage(systemName: "speaker.slash.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 25, weight: .thin, scale: .large))
+            contentConfig.image = image
             contentConfig.imageProperties.tintColor = .white
             contentConfig.attributedText = title
             contentConfig.textProperties.color = .white
-            contentConfig.textProperties.font = .systemFont(ofSize: adjustViewForNarrowDisplay ? 16 : 18, weight: .bold)
+            contentConfig.textProperties.font = .systemFont(ofSize: adjustViewForNarrowDisplay ? 16 : 18, weight: .semibold)
             contentConfig.textProperties.adjustsFontSizeToFitWidth = true
             contentConfig.secondaryText = String(format: NSLocalizedString("Until %1$@", comment: "indication of when alerts will be unmuted (1: time when alerts unmute)"), formattedAlertMuteEndTime)
             contentConfig.secondaryTextProperties.color = .white
             contentConfig.secondaryTextProperties.font = .systemFont(ofSize: adjustViewForNarrowDisplay ? 13 : 15)
             contentConfiguration = contentConfig
 
+            let backgroundGradient = GradientView()
+            (backgroundGradient.layer as? CAGradientLayer)?.colors = [UIColor.warning.cgColor, UIColor.warning.withAlphaComponent(0.9).cgColor]
+            
             var backgroundConfig = backgroundConfiguration?.updated(for: state)
-            backgroundConfig?.backgroundColor = .warning.withAlphaComponent(0.8)
+            backgroundConfig?.customView = backgroundGradient
             backgroundConfiguration = backgroundConfig
-            backgroundConfiguration?.backgroundInsets = NSDirectionalEdgeInsets(top: 0, leading: 10, bottom: 5, trailing: 10)
+            backgroundConfiguration?.backgroundInsets = NSDirectionalEdgeInsets(top: 0, leading: 5, bottom: 5, trailing: 5)
             backgroundConfiguration?.cornerRadius = 10
 
             let unmuteIndicator = UIImage(systemName: "stop.circle")?.withTintColor(.white)
@@ -953,6 +971,7 @@ final class StatusTableViewController: LoopChartsTableViewController {
             } else {
                 let cell = tableView.dequeueReusableCell(withIdentifier: MuteAlertsWarningCell.className, for: indexPath) as! MuteAlertsWarningCell
                 cell.formattedAlertMuteEndTime = alertMuter.formattedEndTime
+                cell.selectionStyle = .none
                 return cell
             }
         case .hud:
@@ -1063,7 +1082,6 @@ final class StatusTableViewController: LoopChartsTableViewController {
                     progressCell.selectionStyle = .none
                     progressCell.totalUnits = dose.programmedUnits
                     progressCell.tintColor = .insulinTintColor
-                    progressCell.unit = HKUnit.internationalUnit()
                     progressCell.deliveredUnits = bolusProgressReporter?.progress.deliveredUnits
                     progressCell.backgroundColor = .secondarySystemBackground
                     return progressCell
@@ -1346,44 +1364,67 @@ final class StatusTableViewController: LoopChartsTableViewController {
             if let activity = activity {
                 viewModel.restoreUserActivityState(activity)
             }
-            let bolusEntryView = SimpleBolusView(viewModel: viewModel).environmentObject(deviceManager.displayGlucoseUnitObservable)
+            let bolusEntryView = SimpleBolusView(viewModel: viewModel).environmentObject(deviceManager.displayGlucosePreference)
             let hostingController = DismissibleHostingController(rootView: bolusEntryView, isModalInPresentation: false)
             navigationWrapper = UINavigationController(rootViewController: hostingController)
             hostingController.navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: navigationWrapper, action: #selector(dismissWithAnimation))
+            present(navigationWrapper, animated: true)
         } else {
-            let carbEntryViewController = UIStoryboard(name: "Main", bundle: Bundle(for: AppDelegate.self)).instantiateViewController(withIdentifier: "CarbEntryViewController") as! CarbEntryViewController
-
-            carbEntryViewController.deviceManager = deviceManager
-            carbEntryViewController.defaultAbsorptionTimes = deviceManager.carbStore.defaultAbsorptionTimes
-            carbEntryViewController.preferredCarbUnit = deviceManager.carbStore.preferredUnit
-            if let activity = activity {
-                carbEntryViewController.restoreUserActivityState(activity)
+            let viewModel = CarbEntryViewModel(delegate: deviceManager)
+            if let activity {
+                viewModel.restoreUserActivityState(activity)
             }
-            navigationWrapper = UINavigationController(rootViewController: carbEntryViewController)
+            let carbEntryView = CarbEntryView(viewModel: viewModel)
+                .environmentObject(deviceManager.displayGlucosePreference)
+            let hostingController = DismissibleHostingController(rootView: carbEntryView, isModalInPresentation: false)
+            present(hostingController, animated: true)
         }
-        present(navigationWrapper, animated: true)
         deviceManager.analyticsServicesManager.didDisplayCarbEntryScreen()
     }
 
     @IBAction func presentBolusScreen() {
         presentBolusEntryView()
     }
+    
+    @ViewBuilder
+    func bolusEntryView(enableManualGlucoseEntry: Bool = false) -> some View {
+        if FeatureFlags.simpleBolusCalculatorEnabled && !automaticDosingStatus.automaticDosingEnabled {
+            SimpleBolusView(
+                viewModel: SimpleBolusViewModel(
+                    delegate: deviceManager,
+                    displayMealEntry: false
+                )
+            )
+            .environmentObject(deviceManager.displayGlucosePreference)
+        } else {
+            let viewModel: BolusEntryViewModel = {
+                let viewModel = BolusEntryViewModel(
+                    delegate: deviceManager,
+                    screenWidth: UIScreen.main.bounds.width,
+                    isManualGlucoseEntryEnabled: enableManualGlucoseEntry
+                )
+                
+                Task { @MainActor in
+                    await viewModel.generateRecommendationAndStartObserving()
+                }
+                
+                viewModel.analyticsServicesManager = deviceManager.analyticsServicesManager
+                
+                return viewModel
+            }()
+            
+            BolusEntryView(viewModel: viewModel)
+                .environmentObject(deviceManager.displayGlucosePreference)
+        }
+    }
 
     func presentBolusEntryView(enableManualGlucoseEntry: Bool = false) {
-        let hostingController: DismissibleHostingController
-        if FeatureFlags.simpleBolusCalculatorEnabled && !automaticDosingStatus.automaticDosingEnabled {
-            let viewModel = SimpleBolusViewModel(delegate: deviceManager, displayMealEntry: false)
-            let bolusEntryView = SimpleBolusView(viewModel: viewModel).environmentObject(deviceManager.displayGlucoseUnitObservable)
-            hostingController = DismissibleHostingController(rootView: bolusEntryView, isModalInPresentation: false)
-        } else {
-            let viewModel = BolusEntryViewModel(delegate: deviceManager, screenWidth: UIScreen.main.bounds.width, isManualGlucoseEntryEnabled: enableManualGlucoseEntry)
-            Task { @MainActor in
-                await viewModel.generateRecommendationAndStartObserving()
-            }
-            viewModel.analyticsServicesManager = deviceManager.analyticsServicesManager
-            let bolusEntryView = BolusEntryView(viewModel: viewModel).environmentObject(deviceManager.displayGlucoseUnitObservable)
-            hostingController = DismissibleHostingController(rootView: bolusEntryView, isModalInPresentation: false)
-        }
+        let hostingController = DismissibleHostingController(
+            content: bolusEntryView(
+                enableManualGlucoseEntry: enableManualGlucoseEntry
+            )
+        )
+        
         let navigationWrapper = UINavigationController(rootViewController: hostingController)
         hostingController.navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: navigationWrapper, action: #selector(dismissWithAnimation))
         present(navigationWrapper, animated: true)
@@ -1391,7 +1432,7 @@ final class StatusTableViewController: LoopChartsTableViewController {
     }
 
     private func createPreMealButtonItem(selected: Bool, isEnabled: Bool) -> UIBarButtonItem {
-        let item = UIBarButtonItem(image: UIImage.preMealImage(selected: selected), style: .plain, target: self, action: #selector(togglePreMealMode(_:)))
+        let item = UIBarButtonItem(image: UIImage.preMealImage(selected: selected), style: .plain, target: self, action: #selector(premealButtonTapped(_:)))
         item.accessibilityLabel = NSLocalizedString("Pre-Meal Targets", comment: "The label of the pre-meal mode toggle button")
 
         if selected {
@@ -1406,7 +1447,7 @@ final class StatusTableViewController: LoopChartsTableViewController {
 
         return item
     }
-
+    
     private func createWorkoutButtonItem(selected: Bool, isEnabled: Bool) -> UIBarButtonItem {
         let item = UIBarButtonItem(image: UIImage.workoutImage(selected: selected), style: .plain, target: self, action: #selector(toggleWorkoutMode(_:)))
         item.accessibilityLabel = NSLocalizedString("Workout Targets", comment: "The label of the workout mode toggle button")
@@ -1424,72 +1465,110 @@ final class StatusTableViewController: LoopChartsTableViewController {
         return item
     }
 
-    @IBAction func togglePreMealMode(_ sender: UIBarButtonItem) {
+    @IBAction func premealButtonTapped(_ sender: UIBarButtonItem) {
+        togglePreMealMode(confirm: false)
+    }
+    
+    func togglePreMealMode(confirm: Bool = true) {
         if preMealMode == true {
-            deviceManager.loopManager.mutateSettings { settings in
-                settings.clearOverride(matching: .preMeal)
+            if confirm {
+                let alert = UIAlertController(title: "Disable Pre-Meal Preset?", message: "This will remove any currently applied pre-meal preset.", preferredStyle: .alert)
+                alert.addCancelAction()
+                alert.addAction(UIAlertAction(title: "Disable", style: .destructive, handler: { [weak self] _ in
+                    self?.deviceManager.loopManager.mutateSettings { settings in
+                        settings.clearOverride(matching: .preMeal)
+                    }
+                }))
+                present(alert, animated: true)
+            } else {
+                deviceManager.loopManager.mutateSettings { settings in
+                    settings.clearOverride(matching: .preMeal)
+                }
             }
         } else {
-            let vc = UIAlertController(premealDurationSelectionHandler: { duration in
-                let startDate = Date()
-
-                guard self.workoutMode != true else {
-                    // allow cell animation when switching between presets
-                    self.deviceManager.loopManager.mutateSettings { settings in
-                        settings.clearOverride()
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        self.deviceManager.loopManager.mutateSettings { settings in
-                            settings.enablePreMealOverride(at: startDate, for: duration)
-                        }
-                    }
-                    return
-                }
-
-                self.deviceManager.loopManager.mutateSettings { settings in
-                    settings.enablePreMealOverride(at: startDate, for: duration)
-                }
-            })
-
-            present(vc, animated: true, completion: nil)
+            presentPreMealModeAlertController()
         }
     }
+    
+    func presentPreMealModeAlertController() {
+        let vc = UIAlertController(premealDurationSelectionHandler: { duration in
+            let startDate = Date()
 
-    @IBAction func toggleWorkoutMode(_ sender: UIBarButtonItem) {
+            guard self.workoutMode != true else {
+                // allow cell animation when switching between presets
+                self.deviceManager.loopManager.mutateSettings { settings in
+                    settings.clearOverride()
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    self.deviceManager.loopManager.mutateSettings { settings in
+                        settings.enablePreMealOverride(at: startDate, for: duration)
+                    }
+                }
+                return
+            }
+
+            self.deviceManager.loopManager.mutateSettings { settings in
+                settings.enablePreMealOverride(at: startDate, for: duration)
+            }
+        })
+
+        present(vc, animated: true, completion: nil)
+    }
+
+    func presentCustomPresets(confirm: Bool = true) {
         if workoutMode == true {
-            deviceManager.loopManager.mutateSettings { settings in
-                settings.clearOverride()
+            if confirm {
+                let alert = UIAlertController(title: "Disable Preset?", message: "This will remove any currently applied preset.", preferredStyle: .alert)
+                alert.addCancelAction()
+                alert.addAction(UIAlertAction(title: "Disable", style: .destructive, handler: { [weak self] _ in
+                    self?.deviceManager.loopManager.mutateSettings { settings in
+                        settings.clearOverride()
+                    }
+                }))
+                present(alert, animated: true)
+            } else {
+                deviceManager.loopManager.mutateSettings { settings in
+                    settings.clearOverride()
+                }
             }
         } else {
             if FeatureFlags.sensitivityOverridesEnabled {
                 performSegue(withIdentifier: OverrideSelectionViewController.className, sender: toolbarItems![6])
             } else {
-                let vc = UIAlertController(workoutDurationSelectionHandler: { duration in
-                    let startDate = Date()
-
-                    guard self.preMealMode != true else {
-                        // allow cell animation when switching between presets
-                        self.deviceManager.loopManager.mutateSettings { settings in
-                            settings.clearOverride(matching: .preMeal)
-                        }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                            self.deviceManager.loopManager.mutateSettings { settings in
-                                settings.enableLegacyWorkoutOverride(at: startDate, for: duration)
-                            }
-                        }
-                        return
-                    }
-
-                    self.deviceManager.loopManager.mutateSettings { settings in
-                        settings.enableLegacyWorkoutOverride(at: startDate, for: duration)
-                    }
-                })
-
-                present(vc, animated: true, completion: nil)
+                presentWorkoutModeAlertController()
             }
         }
     }
+    
+    func presentWorkoutModeAlertController() {
+        let vc = UIAlertController(workoutDurationSelectionHandler: { duration in
+            let startDate = Date()
 
+            guard self.preMealMode != true else {
+                // allow cell animation when switching between presets
+                self.deviceManager.loopManager.mutateSettings { settings in
+                    settings.clearOverride(matching: .preMeal)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    self.deviceManager.loopManager.mutateSettings { settings in
+                        settings.enableLegacyWorkoutOverride(at: startDate, for: duration)
+                    }
+                }
+                return
+            }
+
+            self.deviceManager.loopManager.mutateSettings { settings in
+                settings.enableLegacyWorkoutOverride(at: startDate, for: duration)
+            }
+        })
+
+        present(vc, animated: true, completion: nil)
+    }
+
+    @IBAction func toggleWorkoutMode(_ sender: UIBarButtonItem) {
+        presentCustomPresets(confirm: false)
+    }
+    
     @IBAction func onSettingsTapped(_ sender: UIBarButtonItem) {
         presentSettings()
     }
@@ -1553,7 +1632,7 @@ final class StatusTableViewController: LoopChartsTableViewController {
                                           delegate: self)
         let hostingController = DismissibleHostingController(
             rootView: SettingsView(viewModel: viewModel, localizedAppNameAndVersion: supportManager.localizedAppNameAndVersion)
-                .environmentObject(deviceManager.displayGlucoseUnitObservable)
+                .environmentObject(deviceManager.displayGlucosePreference)
                 .environment(\.appName, Bundle.main.bundleDisplayName),
             isModalInPresentation: false)
         present(hostingController, animated: true)
@@ -1575,14 +1654,14 @@ final class StatusTableViewController: LoopChartsTableViewController {
             return
         }
 
-        var settings = cgmManager.settingsViewController(bluetoothProvider: deviceManager.bluetoothProvider, displayGlucoseUnitObservable: deviceManager.displayGlucoseUnitObservable, colorPalette: .default, allowDebugFeatures: FeatureFlags.allowDebugFeatures)
+        var settings = cgmManager.settingsViewController(bluetoothProvider: deviceManager.bluetoothProvider, displayGlucosePreference: deviceManager.displayGlucosePreference, colorPalette: .default, allowDebugFeatures: FeatureFlags.allowDebugFeatures)
         settings.cgmManagerOnboardingDelegate = deviceManager
         settings.completionDelegate = self
         show(settings, sender: self)
     }
 
     private func automaticDosingStatusChanged(_ automaticDosingEnabled: Bool) {
-        updatePreMealModeAvailability(automaticDosingEnabled: automaticDosingEnabled)
+        updatePresetModeAvailability(automaticDosingEnabled: automaticDosingEnabled)
         hudView?.loopCompletionHUD.loopIconClosed = automaticDosingEnabled
         hudView?.loopCompletionHUD.closedLoopDisallowedLocalizedDescription = deviceManager.closedLoopDisallowedLocalizedDescription
     }
@@ -1784,15 +1863,6 @@ final class StatusTableViewController: LoopChartsTableViewController {
             }
         }
         lastOrientation = UIDevice.current.orientation
-    }
-
-    override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
-        guard FeatureFlags.allowDebugFeatures else {
-            return
-        }
-        if motion == .motionShake {
-            presentDebugMenu()
-        }
     }
 
     private func presentDebugMenu() {
@@ -2176,7 +2246,7 @@ extension StatusTableViewController: ServicesViewModelDelegate {
     }
 
     func gotoService(withIdentifier identifier: String) {
-        guard let serviceUI = deviceManager.servicesManager.activeServices.first(where: { $0.serviceIdentifier == identifier }) as? ServiceUI else {
+        guard let serviceUI = deviceManager.servicesManager.activeServices.first(where: { $0.pluginIdentifier == identifier }) as? ServiceUI else {
             return
         }
         showServiceSettings(serviceUI)
